@@ -1,0 +1,117 @@
+---
+title: "Edge - Array analysis of inner ear cells"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 8
+    fig_height: 6
+author: "Meeta Mistry"
+---
+
+```{r setup, echo=FALSE}
+
+# Setup report details
+clientname="Judith Kempfle"
+clientemail="Judith_Kempfle@MEEI.HARVARD.EDU"
+lablocation="HSCI - Edge Lab"
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+Array analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:
+
+> Arrays run on Mouse Ref 8 v2.0 Expression Array Ambion
+
+
+## Workflow: 
+* 
+* 
+* 
+* 
+
+
+## Setup
+
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+library(IDATreader) ## must have base64 and Rtools installed
+library(Biobase)
+library(limma)
+library(lattice)
+library(ggplot2)
+library(RColorBrewer)
+library(arrayQualityMetrics)
+library(reshape)
+library(dplyr)
+library(CHBUtils)
+```
+
+### Get variables
+- get base directory for analyses
+- specify data and results directories
+- specify column headers used in metadata file
+
+
+```{r variables, echo=TRUE}
+# Setup directory variables
+baseDir <- '.'
+dataDir <- file.path(baseDir, "data")
+metaDir <- file.path(baseDir, "meta")
+resultsDir <- file.path(baseDir, "results")
+```
+
+
+## Load data: Decrypt IDAT files into an expression matrix
+```{r idatreader}
+
+# Get path for all .idat files
+dirlist <- scan(file.path(dataDir, "directories.txt"))
+filenames = lapply(dirlist, function(x){
+    path <- file.path(dataDir, x)
+    files <- list.files(path=path, pattern=".idat")
+    return(paste0(path, "/", files))})
+filenames <- unlist(filenames)
+
+# Decrypt the .idat files
+theData = lapply(filenames, readIDAT)
+
+# Extract expression information only
+exprs = sapply(theData, function(x) {
+  out <- x$TrimmedMeanBinData
+  names(out) <- x$CodesBinData
+  return(out)})
+
+# Get column names for expression matrix
+getcolnames = lapply(filenames, function(x){
+  sp <- strsplit(x, "/", fixed=T)
+  s <- unlist(strsplit(sp[[1]][4], "_", fixed=T))
+  cname <- paste(s[1], s[2], sep="_")
+  return(cname)})
+colnames(exprs)= unlist(getcolnames)
+
+# Map rownames to Illumina IDs
+ref8 <- read.delim(file.path(metaDir, "MouseRef-8_V2.txt"), sep="\t", header=T,)
+ref8ctl <- read.csv(file.path(metaDir, "control probes.csv"), header=T)
+
+m <- match(row.names(exprs), ref8$Array_Address_Id)
+
+annot <- ref8[which(ref8$Array_Address_Id %in% rownames(exprs)), c('Array_Address_Id', 'Probe_Id', 'ILMN_Gene')]
+annot_ctl <- ref8ctl[which(ref8ctl$ProbeID %in% rownames(exprs)), c('ProbeID', 'TargetID')]
+annot_ctl <- cbind(annot_ctl, rep(NA, nrow(annot_ctl)))
+colnames(annot_ctl) <- colnames(annot)
+
+sub<-HT12ctl[which(HT12ctl$Array_Address_Id %in% rownames(exprs) == T),]
+annot<-rbind(annot, cbind(sub$Array_Address_Id, sub$Probe_Id))
+rownames(annot)<-annot[,1]
+annot<-annot[,-1]
+
+pids<-annot[row.names(exprs)]
+exprs<-exprs[-which(is.na(pids)),]
+rownames(exprs)<-pids[which(!is.na(pids))]
+```
+
+
