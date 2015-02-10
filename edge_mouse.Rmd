@@ -23,22 +23,25 @@ analystemail="mmistry@hsph.harvard.edu"
 
 Array analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:
 
-> Arrays run on Mouse Ref 8 v2.0 Expression Array Ambion
+> Arrays run on Mouse Ref 8 v2.0 Expression Array Ambion to make the following comparisons:
+>
+> 1. Compare our stem cell derived hair cells to the actual hair cells and make an assumption about their maturity (Atoh1 primary vs. Atoh1 derived)
+> 2. Compare our postnatal supporting cells to the more stem cell like proliferating Lgr5+ cells to assess stem cell potential of supporting cells (Sox2-GFP)
+> 3. Compare hair cells and supporting cells (Atoh1-GFP vs. Sox2-GFP)
 
 
-## Workflow: 
-* 
-* 
-* 
-* 
-
+## Workflow
+* Load in expression data and metadata
+* Extract relevant information
+* Make requested comparisons
 
 ## Setup
 
 ### Bioconductor and R libraries used
 
 ```{r libraries, echo=TRUE}
-library(IDATreader) ## must have base64 and Rtools installed
+
+loadlibs <- function(){
 library(Biobase)
 library(limma)
 library(lattice)
@@ -47,13 +50,16 @@ library(RColorBrewer)
 library(arrayQualityMetrics)
 library(reshape)
 library(dplyr)
+library(illuminaio)
 library(CHBUtils)
+}
+suppressPackageStartupMessages(loadlibs())
 ```
 
 ### Get variables
-- get base directory for analyses
-- specify data and results directories
-- specify column headers used in metadata file
+* get base directory for analyses
+* specify data and results directories
+* specify column headers used in metadata file
 
 
 ```{r variables, echo=TRUE}
@@ -65,7 +71,9 @@ resultsDir <- file.path(baseDir, "results")
 ```
 
 
-## Load data: Decrypt IDAT files into an expression matrix
+## Load Data
+We used the R package [illuminaio](http://www.bioconductor.org/packages/release/bioc/vignettes/illuminaio/inst/doc/illuminaio.pdf) to load in the data and extract the approapriate information. From the IDAT files we want to use the TrimmedMeanBinData which is the result of the outlier removal that Illumina perform as standard (consistent with GenomeStudio). In order to get probe annotations for the array and control probes we dowloaded the MouseRef8 v2.0 BGX file from the [Illumina website](http://support.illumina.com/array/downloads.html). 
+
 ```{r idatreader}
 
 # Get path for all .idat files
@@ -81,8 +89,9 @@ theData = lapply(filenames, readIDAT)
 
 # Extract expression information only
 exprs = sapply(theData, function(x) {
-  out <- x$TrimmedMeanBinData
-  names(out) <- x$CodesBinData
+  quants <- x$Quants
+  out <- quants$TrimmedMeanBinData
+  names(out) <- quants$CodesBinData
   return(out)})
 
 # Get column names for expression matrix
@@ -94,35 +103,26 @@ getcolnames = lapply(filenames, function(x){
 colnames(exprs)= unlist(getcolnames)
 
 # Map rownames to Illumina IDs
-ref8 <- read.delim(file.path(metaDir, "MouseRef-8_V2.txt"), sep="\t", header=T,)
-ref8ctl <- read.csv(file.path(metaDir, "control probes.csv"), header=T)
+bgxfile <- readBGX(file.path('meta/MouseRef-8_V2_0_R2_11278551_A.bgx'))
+ref8 <- bgxfile$probes
+ref8ctl <- bgxfile$controls
 
-annot <- ref8[which(ref8$Array_Address_Id %in% rownames(exprs)), c('Array_Address_Id', 'Probe_Id', 'ILMN_Gene',
-                                                                   'Entrez_Gene_ID', 'Cytoband')]
-annot_ctl <- ref8ctl[which(ref8ctl$ProbeID %in% rownames(exprs)), c('ProbeID', 'TargetID')]
-
-# Missing 292 probe annotations
-pids<-c(annot$Array_Address_Id, annot_ctl$ProbeID)
+# Remove probes missing annotations
+pids<-c(ref8$Array_Address_Id, ref8ctl$Array_Address_Id)
 exprs.new <- exprs[which(rownames(exprs) %in% pids),]
 ```
 
 ## Background correction (using neqc::limma)
-Illumina negative control probes (sequences with no match to the genome) can be used to correct observed signal intensity using a normal exponential convolution model to reduce bias and FPS. Adding small offset to corrected intensities can reduce FDR further (neqc offset = 16).
+Expression values extarcted from IDAT files have not been normalized relative to other arrays, nor background corrected in the sense of negative controls are used to find a baseline. Illumina negative control probes (sequences with no match to the genome) can be used to correct observed signal intensity using a normal exponential convolution model to reduce bias and FPS. Adding small offset to corrected intensities can reduce FDR further (neqc offset = 16).
 
 ```{r bg-correct}
 
-neg <- annot_ctl$ProbeID
-reg <- annot$Array_Address_Id
 status <- rownames(exprs.new)
-status <- replace(status, which(status %in% neg == TRUE), "negative")
-status <- replace(status, which(status %in% reg == TRUE), "regular")
+status <- replace(status, which(status %in% ref8ctl$Array_Address_Id == TRUE), "negative")
+status <- replace(status, which(status %in% ref8$Array_Address_Id == TRUE), "regular")
 
 #estimating proportion of detected probes
 exp.prop <- propexpr(exprs.new, status=status, labels=c("negative", "regular") )
-prop.low <- names(exp.prop)[which(exp.prop <= 0.2)]
-
-#parameters required by normal+exponential(normexp) convolution model with the help of negative control probes
-param <- normexp.fit.control(exprs.new, status=status, negctrl="negative", regular="regular", robust=FALSE)
 
 #background correction followed by quantile normalization and log2 transformation
 exprs.bg <- neqc(exprs.new, status=status, negctrl="negative", regular="regular", offset=16)# returns matrix without control probes
@@ -131,14 +131,40 @@ exprs.bg <- neqc(exprs.new, status=status, negctrl="negative", regular="regular"
 
 ## Create expression set object
 ```{r eset}
+# Load metadata and rearrange
+meta <- read.csv(file.path(metaDir, '2014-436_sample_key.csv'), header=T)
+row.names(meta) <- paste(meta$array, meta$slide, sep="_")
+meta <- meta[,-c(1,2)]
 
-# eset <- new("ExpressionSet", phenoData=as(pheno, "AnnotatedDataFrame"), exprs=as.matrix(exprs.bg))
-eset <- new("ExpressionSet", exprs=as.matrix(exprs.bg))
-fData(eset) <- data.frame(annot[,2:5], row.names=annot$Array_Address_Id)
+# Create feature data
+keep <- which(ref8$Array_Address_Id %in% row.names(exprs.bg))
+annot <- data.frame(ref8[keep, c('Probe_Id','Symbol', 'Entrez_Gene_ID', 'Cytoband')], row.names=ref8[keep, 'Array_Address_Id'])
+annot <- annot[row.names(exprs.bg),]
+
+# Create expresion set object
+eset <- new("ExpressionSet", phenoData=as(meta, "AnnotatedDataFrame"), exprs=as.matrix(exprs.bg), 
+            featureData=as(annot, "AnnotatedDataFrame"))
 
 ```
 
 
+## Quality control
+The results from the quality control check can be found at this [link](./results/reprot_aqm/index.html). The array intensity distributions and density plots are consistent across samples indicating there are no obvious outlier samples based on expression levels. The PCA figure below give us an idea of how samples tend to cluster; illustrating that based on the first and second principal component samples best cluster by celltype. Within the Atoh1 hair cells, we also see separation of the primary from the derived cells. **From the Lgr5+ sample group there is one major outlier (9982502025_D)**. From the inter-correlation heatmap the same sample appears to show a low correlation with all other samples in the dataset. This sample will be removed for downstream analysis.
 
+```{r QC_report, echo=TRUE, eval=FALSE}
 
+ arrayQualityMetrics(expressionset=eset, intgroup=c('celltype'),
+                     outdir='./results/report_aqm', force=TRUE,  do.logtransform=FALSE)
+```
+
+### PCA
+```{r pca, echo=FALSE, fig.align='center'}
+mds(exprs.bg, condition =meta$celltype, k=length(colnames(exprs.bg)) - 1)
+```
+
+### Sample-to-sample correlation
+```{r cormat, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE}
+p = ggheatmap(cor(exprs.bg))
+ggheatmap.show(p)
+```
 
