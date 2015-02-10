@@ -97,21 +97,48 @@ colnames(exprs)= unlist(getcolnames)
 ref8 <- read.delim(file.path(metaDir, "MouseRef-8_V2.txt"), sep="\t", header=T,)
 ref8ctl <- read.csv(file.path(metaDir, "control probes.csv"), header=T)
 
-m <- match(row.names(exprs), ref8$Array_Address_Id)
-
-annot <- ref8[which(ref8$Array_Address_Id %in% rownames(exprs)), c('Array_Address_Id', 'Probe_Id', 'ILMN_Gene')]
+annot <- ref8[which(ref8$Array_Address_Id %in% rownames(exprs)), c('Array_Address_Id', 'Probe_Id', 'ILMN_Gene',
+                                                                   'Entrez_Gene_ID', 'Cytoband')]
 annot_ctl <- ref8ctl[which(ref8ctl$ProbeID %in% rownames(exprs)), c('ProbeID', 'TargetID')]
-annot_ctl <- cbind(annot_ctl, rep(NA, nrow(annot_ctl)))
-colnames(annot_ctl) <- colnames(annot)
 
-sub<-HT12ctl[which(HT12ctl$Array_Address_Id %in% rownames(exprs) == T),]
-annot<-rbind(annot, cbind(sub$Array_Address_Id, sub$Probe_Id))
-rownames(annot)<-annot[,1]
-annot<-annot[,-1]
-
-pids<-annot[row.names(exprs)]
-exprs<-exprs[-which(is.na(pids)),]
-rownames(exprs)<-pids[which(!is.na(pids))]
+# Missing 292 probe annotations
+pids<-c(annot$Array_Address_Id, annot_ctl$ProbeID)
+exprs.new <- exprs[which(rownames(exprs) %in% pids),]
 ```
+
+## Background correction (using neqc::limma)
+Illumina negative control probes (sequences with no match to the genome) can be used to correct observed signal intensity using a normal exponential convolution model to reduce bias and FPS. Adding small offset to corrected intensities can reduce FDR further (neqc offset = 16).
+
+```{r bg-correct}
+
+neg <- annot_ctl$ProbeID
+reg <- annot$Array_Address_Id
+status <- rownames(exprs.new)
+status <- replace(status, which(status %in% neg == TRUE), "negative")
+status <- replace(status, which(status %in% reg == TRUE), "regular")
+
+#estimating proportion of detected probes
+exp.prop <- propexpr(exprs.new, status=status, labels=c("negative", "regular") )
+prop.low <- names(exp.prop)[which(exp.prop <= 0.2)]
+
+#parameters required by normal+exponential(normexp) convolution model with the help of negative control probes
+param <- normexp.fit.control(exprs.new, status=status, negctrl="negative", regular="regular", robust=FALSE)
+
+#background correction followed by quantile normalization and log2 transformation
+exprs.bg <- neqc(exprs.new, status=status, negctrl="negative", regular="regular", offset=16)# returns matrix without control probes
+```
+
+
+## Create expression set object
+```{r eset}
+
+# eset <- new("ExpressionSet", phenoData=as(pheno, "AnnotatedDataFrame"), exprs=as.matrix(exprs.bg))
+eset <- new("ExpressionSet", exprs=as.matrix(exprs.bg))
+fData(eset) <- data.frame(annot[,2:5], row.names=annot$Array_Address_Id)
+
+```
+
+
+
 
 
