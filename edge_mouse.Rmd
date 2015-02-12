@@ -2,7 +2,7 @@
 title: "Edge - Array analysis of inner ear cells"
 output:
   html_document:
-    theme: cosmo
+    theme: cerulean
     toc: true
     toc_depth: 4
     fig_caption: true
@@ -26,7 +26,7 @@ Array analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact 
 > Arrays run on Mouse Ref 8 v2.0 Expression Array Ambion to make the following comparisons:
 >
 > 1. Compare our stem cell derived hair cells to the actual hair cells and make an assumption about their maturity (Atoh1 primary vs. Atoh1 derived)
-> 2. Compare our postnatal supporting cells to the more stem cell like proliferating Lgr5+ cells to assess stem cell potential of supporting cells (Sox2-GFP)
+> 2. Compare our postnatal supporting cells to the more stem cell like proliferating (Lgr5+) cells to assess stem cell potential of supporting cells (Sox2-GFP)
 > 3. Compare hair cells and supporting cells (Atoh1-GFP vs. Sox2-GFP)
 
 
@@ -50,7 +50,7 @@ library(RColorBrewer)
 library(arrayQualityMetrics)
 library(reshape)
 library(dplyr)
-library(illuminaio)
+library(beadarray)
 library(CHBUtils)
 }
 suppressPackageStartupMessages(loadlibs())
@@ -72,9 +72,9 @@ resultsDir <- file.path(baseDir, "results")
 
 
 ## Load Data
-We used the R package [illuminaio](http://www.bioconductor.org/packages/release/bioc/vignettes/illuminaio/inst/doc/illuminaio.pdf) to load in the data and extract the approapriate information. From the IDAT files we want to use the TrimmedMeanBinData which is the result of the outlier removal that Illumina perform as standard (consistent with GenomeStudio). In order to get probe annotations for the array and control probes we dowloaded the MouseRef8 v2.0 BGX file from the [Illumina website](http://support.illumina.com/array/downloads.html). 
+We used the R package [beadarray](http://www.bioconductor.org/packages/release/bioc/vignettes/beadarray/inst/doc/beadsummary.pdf) to load in the data and extract the approapriate information. Data can be loaded via IDAT files or from the files generated in GenomeStudio. Using GenomeStudio file has the advantage of including quality control information used for diagnostic plots. We tried both methods here.
 
-```{r idatreader}
+```{r beadarray, message=FALSE, warning=FALSE}
 
 # Get path for all .idat files
 dirlist <- scan(file.path(dataDir, "directories.txt"))
@@ -84,87 +84,195 @@ filenames = lapply(dirlist, function(x){
     return(paste0(path, "/", files))})
 filenames <- unlist(filenames)
 
-# Decrypt the .idat files
-theData = lapply(filenames, readIDAT)
+# Create ExpressionSet Illumina object
+beadData.idat <- readIdatFiles(filenames)
 
-# Extract expression information only
-exprs = sapply(theData, function(x) {
-  quants <- x$Quants
-  out <- quants$TrimmedMeanBinData
-  names(out) <- quants$CodesBinData
-  return(out)})
+# OR Not using IDAT files
+datafile <- file.path(metaDir, "sample_probe_profile.csv")
+qcfile <- file.path(metaDir, "control_probes.csv")
+beadData <- readBeadSummaryData(dataFile = datafile, qcFile = qcfile, sep=",", ProbeID = "PROBE_ID", skip = 0, 
+                                columns = list(exprs = "AVG_Signal", Detection = "Detection_Pval", se.exprs = "BEAD_STDERR",
+                                                  nObservations = "Avg_NBEADS"),
+                                qc.skip = 0, qc.sep =",", controlID = "ProbeID", 
+                                qc.columns = list(exprs = "AVG_Signal", Detection = "Detection_Pval"),
+                                annoCols=c("PROBE_ID", "SYMBOL","ENTREZ_GENE_ID","CHROMOSOME"))
 
-# Get column names for expression matrix
-getcolnames = lapply(filenames, function(x){
-  sp <- strsplit(x, "/", fixed=T)
-  s <- unlist(strsplit(sp[[1]][4], "_", fixed=T))
-  cname <- paste(s[1], s[2], sep="_")
-  return(cname)})
-colnames(exprs)= unlist(getcolnames)
-
-# Map rownames to Illumina IDs
-bgxfile <- readBGX(file.path('meta/MouseRef-8_V2_0_R2_11278551_A.bgx'))
-ref8 <- bgxfile$probes
-ref8ctl <- bgxfile$controls
-
-# Remove probes missing annotations
-pids<-c(ref8$Array_Address_Id, ref8ctl$Array_Address_Id)
-exprs.new <- exprs[which(rownames(exprs) %in% pids),]
-```
-
-## Background correction (using neqc::limma)
-Expression values extarcted from IDAT files have not been normalized relative to other arrays, nor background corrected in the sense of negative controls are used to find a baseline. Illumina negative control probes (sequences with no match to the genome) can be used to correct observed signal intensity using a normal exponential convolution model to reduce bias and FPS. Adding small offset to corrected intensities can reduce FDR further (neqc offset = 16).
-
-```{r bg-correct}
-
-status <- rownames(exprs.new)
-status <- replace(status, which(status %in% ref8ctl$Array_Address_Id == TRUE), "negative")
-status <- replace(status, which(status %in% ref8$Array_Address_Id == TRUE), "regular")
-
-#estimating proportion of detected probes
-exp.prop <- propexpr(exprs.new, status=status, labels=c("negative", "regular") )
-
-#background correction followed by quantile normalization and log2 transformation
-exprs.bg <- neqc(exprs.new, status=status, negctrl="negative", regular="regular", offset=16)# returns matrix without control probes
-```
-
-
-## Create expression set object
-```{r eset}
-# Load metadata and rearrange
+# Add metadata
 meta <- read.csv(file.path(metaDir, '2014-436_sample_key.csv'), header=T)
 row.names(meta) <- paste(meta$array, meta$slide, sep="_")
 meta <- meta[,-c(1,2)]
-
-# Create feature data
-keep <- which(ref8$Array_Address_Id %in% row.names(exprs.bg))
-annot <- data.frame(ref8[keep, c('Probe_Id','Symbol', 'Entrez_Gene_ID', 'Cytoband')], row.names=ref8[keep, 'Array_Address_Id'])
-annot <- annot[row.names(exprs.bg),]
-
-# Create expresion set object
-eset <- new("ExpressionSet", phenoData=as(meta, "AnnotatedDataFrame"), exprs=as.matrix(exprs.bg), 
-            featureData=as(annot, "AnnotatedDataFrame"))
-
+pData(beadData) <- meta
 ```
 
-
 ## Quality control
-The results from the quality control check can be found at this [link](./results/reprot_aqm/index.html). The array intensity distributions and density plots are consistent across samples indicating there are no obvious outlier samples based on expression levels. The PCA figure below give us an idea of how samples tend to cluster; illustrating that based on the first and second principal component samples best cluster by celltype. Within the Atoh1 hair cells, we also see separation of the primary from the derived cells. **From the Lgr5+ sample group there is one major outlier (9982502025_D)**. From the inter-correlation heatmap the same sample appears to show a low correlation with all other samples in the dataset. This sample will be removed for downstream analysis.
+The raw expression data were run through arrayQualityMetrics to generate various plots and identify potential outlier samples. The report from the quality control can be found at this [link](./results/report_aqm_bead/index.html). The array intensity distributions and density plots are consistent across samples indicating there are no obvious outlier samples based on expression levels. 
 
 ```{r QC_report, echo=TRUE, eval=FALSE}
 
- arrayQualityMetrics(expressionset=eset, intgroup=c('celltype'),
-                     outdir='./results/report_aqm', force=TRUE,  do.logtransform=FALSE)
+ arrayQualityMetrics(expressionset=beadData, intgroup=c('celltype'),
+                     outdir='./results/report_aqm_bead', force=TRUE,  do.logtransform=FALSE)
+```
+
+## Background correction and normalization (using neqc::limma)
+Expression values have not been normalized relative to other arrays, nor background corrected in the sense of negative controls being used to find a baseline. Illumina negative control probes (sequences with no match to the genome) can be used to correct observed signal intensity using a normal exponential convolution model to reduce bias and FPS. A QC report post-normalization can be found [here](./results/report_aqm_beadnorm/index.html). The resulting expression marix will have negative control probes removed.
+
+```{r bgcorrect-norm}
+bead.norm <- normaliseIllumina(BSData = beadData, method="neqc",
+                               status=fData(beadData)$Status, negctrl="NEGATIVE",regular="regular")
 ```
 
 ### PCA
+The PCA figure below give us an idea of how samples tend to cluster; illustrating that based on the first and second principal component samples best cluster by celltype. Within the Atoh1 hair cells, we also see separation between those with and without compound. **From the Lgr5+ sample group there is one major outlier (9982502025_D)**. From the inter-correlation heatmap the same sample appears to show a low correlation with all other samples in the dataset. This sample will be removed for downstream analysis.
+
 ```{r pca, echo=FALSE, fig.align='center'}
-mds(exprs.bg, condition =meta$celltype, k=length(colnames(exprs.bg)) - 1)
+mds(exprs(bead.norm), condition =meta$sampletype, k=length(colnames(bead.norm)) - 1)
 ```
 
 ### Sample-to-sample correlation
 ```{r cormat, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE}
-p = ggheatmap(cor(exprs.bg))
+p = ggheatmap(cor(exprs(bead.norm)))
 ggheatmap.show(p)
+
+# Remove outlier sample
+remove <- which(row.names(meta) == "9982502025_D")
+bead.norm <- bead.norm[ ,-remove]
+meta <- meta[-remove,]
 ```
 
+## Primary hair cells versus stem-cell derived hair cells
+We set up a design matrix for the first comparison and fit a linear model to include array weights. Empirical array quality weights can be used to measure the relative reliability of each array. A variance is estimated for each array by the `arrayWeights` function which measures how well the expression values from each array follow the linear model. These variances are converted to relative weights which can then be used in the linear model to down-weight observations from less reliable arrays which improves power to detect differential expression. 
+
+Here, we find that at log2FoldChange > 2 and adjuseted p-value < 0.05 there are **227 significant genes** identified as differentially expressed. The volcano plot below illustrates this with fold change on the x-axis and p-values on the y-axis. The genes that meet the  threshold are plotted in green. 
+
+```{r atoh1-gfp, fig.align='center'}
+
+# Subset data
+atoh <- bead.norm[,which(meta$celltype == "Atoh1-GFP")]
+pData(atoh) <- droplevels(pData(atoh))
+
+# Setup design matrix
+fac <- factor(pData(atoh)[,"stage"])
+design <- model.matrix(~0 + fac)
+colnames(design) <- levels(fac)
+
+# Compute weights
+aweights <- arrayWeights(exprs(atoh), design)
+
+# Fit model
+fit <- lmFit(exprs(atoh), design, weights=aweights)
+contrasts <- makeContrasts(primary-derived, levels=design)
+contr.fit <- eBayes(contrasts.fit(fit, contrasts))
+
+# Set threshold 
+res <- toptable(contr.fit, number=nrow(exprs(atoh)), coef=1, sort.by="P")
+p.cutoff <- 0.05
+fc.cutoff <- 2
+res$threshold.FDR <- as.logical(res$adj.P.Val < p.cutoff & abs(res$logFC) >=2 )
+
+ggplot(data=res, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+  geom_point(alpha=0.75, pch=16) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlim(c(-7, 7)) + ylim(c(0, 10)) +
+  xlab("log2 fold change") + ylab("-log10 p-value")
+
+```
+
+## Postnatal supporting cells vesus stem cell-like proliferating Lgr5+ cells
+For the Sox2-GFP versus Lgr5 comparison we also corrected for the fact that there are technical replicate, so not to treat them as independent samples. We find a larger number of genes for this comaprison at the same threshold, with a total of **697 significant genes** identified.
+
+```{r sox2-lgr5, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
+
+# Subset data
+sox_lgr <- bead.norm[,which(meta$celltype != "Atoh1-GFP")]
+pData(sox_lgr) <- droplevels(pData(sox_lgr))
+
+# Setup design matrix
+fac <- factor(pData(sox_lgr)[,"celltype"])
+design <- model.matrix(~0 + fac)
+colnames(design) <- c("Lgr5", "Sox2")
+
+# Compute weights
+aweights <- arrayWeights(exprs(sox_lgr), design)
+
+# Account for technical replicates
+block <- factor(pData(sox_lgr)$replicate)
+corfit <- duplicateCorrelation(exprs(sox_lgr), design, block=block, weights=aweights)
+
+# Fit model
+fit <- lmFit(exprs(sox_lgr), design, weights=aweights, block=block, cor=corfit$consensus)
+contrasts <- makeContrasts(Lgr5-Sox2, levels=design)
+contr.fit <- eBayes(contrasts.fit(fit, contrasts))
+
+# Set threshold 
+res2 <- toptable(contr.fit, number=nrow(exprs(sox_lgr)), coef=1, sort.by="P")
+p.cutoff <- 0.05
+fc.cutoff <- 2
+res2$threshold.FDR <- as.logical(res2$adj.P.Val < p.cutoff & abs(res2$logFC) >=2 )
+
+# volcano_density_plot(res2[,c("logFC", "adj.P.Val")], pval.cutoff = 0.05, lfc.cutoff = 2)
+
+ggplot(data=res2, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+  geom_point(alpha=0.75, pch=16) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlim(c(-7,7)) + ylim(c(0, 16)) +
+  xlab("log2 fold change") + ylab("-log10 p-value")
+
+```
+
+## Hair cells versus Supporting cells
+The final comparison results in a gene list comarable to the first with a total of **296 significant genes** at teh same threshold used above.
+
+```{r atoh-sox2, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
+
+# Get data
+atoh_sox2 <- bead.norm[,which(meta$celltype != "Lgr5-GFP")]
+pData(atoh_sox2) <- droplevels(pData(atoh_sox2))
+
+# Remove unwanted samples
+remove <- which(row.names(pData(atoh_sox2)) == "9982502011_H" | pData(atoh_sox2)$stage == "derived")
+atoh_sox2 <- atoh_sox2[,-remove]
+
+# Setup design matrix
+fac <- factor(pData(atoh_sox2)[,"celltype"])
+design <- model.matrix(~0 + fac)
+colnames(design) <- c("Atoh1", "Sox2")
+
+# Compute weights
+aweights <- arrayWeights(exprs(atoh_sox2), design)
+
+# Fit model
+fit <- lmFit(exprs(atoh_sox2), design, weights=aweights)
+contrasts <- makeContrasts(Atoh1-Sox2, levels=design)
+contr.fit <- eBayes(contrasts.fit(fit, contrasts))
+
+# Set threshold 
+res3 <- toptable(contr.fit, number=nrow(exprs(atoh_sox2)), coef=1, sort.by="P")
+p.cutoff <- 0.05
+fc.cutoff <- 2
+res3$threshold.FDR <- as.logical(res3$adj.P.Val < p.cutoff & abs(res3$logFC) >=2 )
+
+ggplot(data=res3, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+  geom_point(alpha=0.75, pch=16) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlim(c(-6, 6)) + ylim(c(0, 10)) +
+  xlab("log2 fold change") + ylab("-log10 p-value")
+
+```
+
+## Files for download
+Below we have listed links to the various files generated in this report which will be useful for any downstream analysis.
+
+1. Normalized expression matrix [here](./data/normalized.data.txt)
+2. Metadata file [here](./meta/sample_probe_profile.csv) (containing sample information)
+3. Atoh1-GFP versus Atoh1-GFP + compound [significant genes](./results/Atoh1_comparison_results.txt)
+4. Sox2-GFP versus Lgr5+ [significant genes](./results/Sox2_Lgr5_comparison_results.txt)
+5. Hair cells versus Suporting cells [significant genes](./results/Atoh_Sox2_comparison_results.txt)
