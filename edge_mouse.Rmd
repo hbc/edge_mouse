@@ -24,9 +24,9 @@ analystemail="mmistry@hsph.harvard.edu"
 Array analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:
 
 > Arrays run on Mouse Ref 8 v2.0 Expression Array Ambion to make the following comparisons:
->
-> 1. Compare our stem cell derived hair cells to the actual hair cells and make an assumption about their maturity (Atoh1 primary vs. Atoh1 derived)
-> 2. Compare our postnatal supporting cells to the more stem cell like proliferating (Lgr5+) cells to assess stem cell potential of supporting cells (Sox2-GFP)
+>              
+> 1. Compare our postnatal supporting cells to the more stem cell like proliferating (Lgr5+) cells to assess stem cell potential of supporting cells (Sox2-GFP)
+> 2. Compare our stem cell derived hair cells to the actual hair cells and make an assumption about their maturity (Atoh1 primary vs. Atoh1 derived). Additionally check how different they are from the supporting-like stem cells from which they were derived 
 > 3. Compare hair cells and supporting cells (Atoh1-GFP vs. Sox2-GFP)
 
 
@@ -52,6 +52,11 @@ library(reshape)
 library(dplyr)
 library(beadarray)
 library(CHBUtils)
+library(knitr)
+library(gridExtra)
+library(treemap)
+library(gProfileR)
+source('revigo.R') ## for GO analysis
 }
 suppressPackageStartupMessages(loadlibs())
 ```
@@ -72,7 +77,7 @@ resultsDir <- file.path(baseDir, "results")
 
 
 ## Load Data
-We used the R package [beadarray](http://www.bioconductor.org/packages/release/bioc/vignettes/beadarray/inst/doc/beadsummary.pdf) to load in the data and extract the approapriate information. Data can be loaded via IDAT files or from the files generated in GenomeStudio. Using GenomeStudio file has the advantage of including quality control information used for diagnostic plots. We tried both methods here.
+We used the R package [beadarray](http://www.bioconductor.org/packages/release/bioc/vignettes/beadarray/inst/doc/beadsummary.pdf) to load in the data and extract the approapriate information. Data can be loaded via IDAT files or from the files generated in GenomeStudio. We need the "bead summary" data which is the final intensity value for all beads of a particular type (foreground minus backround) after outlier removal. Using GenomeStudio file has the advantage of including quality control information used for diagnostic plots. We tried both methods here.
 
 ```{r beadarray, message=FALSE, warning=FALSE}
 
@@ -139,32 +144,94 @@ bead.norm <- bead.norm[ ,-remove]
 meta <- meta[-remove,]
 ```
 
-## Primary hair cells versus stem-cell derived hair cells
-We set up a design matrix for the first comparison and fit a linear model to include array weights. Empirical array quality weights can be used to measure the relative reliability of each array. A variance is estimated for each array by the `arrayWeights` function which measures how well the expression values from each array follow the linear model. These variances are converted to relative weights which can then be used in the linear model to down-weight observations from less reliable arrays which improves power to detect differential expression. 
+## Postnatal supporting cells versus stem cell-like proliferating Lgr5+ cells
+The Lgr5+ cells are made from a original subset of supporting cells put in culture under proliferating conditions. They proliferate like stem cells but retain their supporting cell phenotype- we call them the "dormant stem cells". They should resemble our Sox2 sorted supporting cells to some extent, but maybe have some more stem cell genes unregulated, as they proliferate.
 
-Here, we find that at log2FoldChange > 2 and adjuseted p-value < 0.05 there are **227 significant genes** identified as differentially expressed. The volcano plot below illustrates this with fold change on the x-axis and p-values on the y-axis. The genes that meet the  threshold are plotted in green. 
+We set up a design matrix for each comparison and fit a linear model to include array weights. Empirical array quality weights can be used to measure the relative reliability of each array. A variance is estimated for each array by the `arrayWeights` function which measures how well the expression values from each array follow the linear model. These variances are converted to relative weights which can then be used in the linear model to down-weight observations from less reliable arrays which improves power to detect differential expression. We also corrected for the fact that there are technical replicates, so not to treat them as independent samples. 
 
-```{r atoh1-gfp, fig.align='center'}
+The first comparison below is **(Sox2 vs. Lgr5)**, where we find a total of **672 significant genes** identified  at a threshold of **log2FoldChange > 2 and adjusted p-value < 0.05**.  The volcano plot below illustrates this with fold change on the x-axis and p-values on the y-axis. The genes that meet the  threshold are plotted in green. 
 
-# Subset data
-atoh <- bead.norm[,which(meta$celltype == "Atoh1-GFP")]
-pData(atoh) <- droplevels(pData(atoh))
+```{r sox2-lgr5, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
 
 # Setup design matrix
-fac <- factor(pData(atoh)[,"stage"])
+fac <- factor(pData(bead.norm)[,"sampletype"])
 design <- model.matrix(~0 + fac)
-colnames(design) <- levels(fac)
+colnames(design) <- c("Atoh1", "Atoh1Compound", "Lgr5", "Sox2")
 
 # Compute weights
-aweights <- arrayWeights(exprs(atoh), design)
+aweights <- arrayWeights(exprs(bead.norm), design)
+
+# Account for technical replicates
+block <- factor(pData(bead.norm)$replicate)
+corfit <- duplicateCorrelation(exprs(bead.norm), design, block=block, weights=aweights)
 
 # Fit model
-fit <- lmFit(exprs(atoh), design, weights=aweights)
-contrasts <- makeContrasts(primary-derived, levels=design)
+fit <- lmFit(exprs(bead.norm), design, weights=aweights, block=block, cor=corfit$consensus)
+contrasts <- makeContrasts(Lgr5-Sox2, levels=design)
 contr.fit <- eBayes(contrasts.fit(fit, contrasts))
 
 # Set threshold 
-res <- toptable(contr.fit, number=nrow(exprs(atoh)), coef=1, sort.by="P")
+res2 <- toptable(contr.fit, number=nrow(exprs(bead.norm)), coef=1, sort.by="P")
+p.cutoff <- 0.05
+fc.cutoff <- 2
+res2$threshold.FDR <- as.logical(res2$adj.P.Val < p.cutoff & abs(res2$logFC) >=2 )
+
+# volcano_density_plot(res2[,c("logFC", "adj.P.Val")], pval.cutoff = 0.05, lfc.cutoff = 2)
+
+ggplot(data=res2, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+  #scale_color_manual(values = c("grey", "green")) +
+  geom_point(alpha=0.75, pch=16) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlim(c(-7,7)) + ylim(c(0, 16)) +
+  xlab("log2 fold change") + ylab("-log10 p-value")
+
+```
+
+### GO Analysis
+Taking our list of significant genes we ran it through [gProfileR](http://biit.cs.ut.ee/gprofiler/), a tool that performs statistical enrichment analysis to find over-representation of information like Gene Ontology terms, biological pathways, regulatory DNA elements, human disease gene annotations, and protein-protein interaction networks.
+
+We took the results from gprofiler and used the significant GO terms as input to [REVIGO](http://revigo.irb.hr/) to visualize the most prominent processes and reduce redundancy of terms. Each rectangle is a single cluster representative. The representatives are joined into ‘superclusters’ of loosely related terms, visualized with different colors. Size of the rectangles may be adjusted to reflect either the p-value, or the frequency of the GO term in the underlying GOA database. We se a cluter of terms representing 'negative regualtion of biological process', which might be in line with processes in Sox2 that are turned off in these "dormant cells". There are also many terms associated with cell motility.
+
+```{r GO-analysis2, echo=FALSE, fig.align='center'}
+
+sig_genes <- row.names(res2)[which(res2$threshold.FDR)]
+sig_genes <- fData(bead.norm)$SYMBOL[which(fData(bead.norm)$ProbeID %in% sig_genes)]
+query <- unique(sig_genes)
+  
+gprofiler_results  <-   gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
+
+allterms <- gprofiler_results$term.id
+GOs <- GOs[grep('GO:', allterms)]
+pvals <- gprofiler_results$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
+
+## Hair cells differentiated from supporting-like stem-cells
+When the above population (Lgr5+) are differentiated, those supporting cell like stem cells are able to differentiate to a large extent into hair cells. We are able to sort for those "hair cells", after 10 days in differentiation condition in culture and purified by FACS. These cells should resemble the native Atoh1-GFP+ hair cells we analyzed, but as they come from our stem cell like supporting cells via transdifferentiation we don't know "how hair cell like" they are.
+
+The next two comparisons are to test stem cell derived hair cells and how different they are from mature hair cells (Atoh1) and how different they are from the supporting like stem cells they were differentiated from (Lgr5+). Using the same threshold as above the mature versus derived cell comaprison identifies **209 significant genes** as differentially expressed with the volcano plots and GO results plotted below.
+
+### Atoh-1 versus Atoh-1 derived
+```{r atoh1-gfp, fig.align='center', echo=FALSE, warning=FALSE, message=FALSE}
+
+# New contrasts
+contrasts <- makeContrasts(Atoh1-Atoh1Compound, levels=design)
+contr.fit <- eBayes(contrasts.fit(fit, contrasts))
+
+# Set threshold 
+res <- toptable(contr.fit, number=nrow(exprs(bead.norm)), coef=1, sort.by="P")
 p.cutoff <- 0.05
 fc.cutoff <- 2
 res$threshold.FDR <- as.logical(res$adj.P.Val < p.cutoff & abs(res$logFC) >=2 )
@@ -180,41 +247,51 @@ ggplot(data=res, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
 
 ```
 
-## Postnatal supporting cells vesus stem cell-like proliferating Lgr5+ cells
-For the Sox2-GFP versus Lgr5 comparison we also corrected for the fact that there are technical replicate, so not to treat them as independent samples. We find a larger number of genes for this comaprison at the same threshold, with a total of **697 significant genes** identified.
+### GO Analysis
+The GO results indicate that genes affected between the derived and primary hair cells fall within the categories of 'response to external stimulus', groth and death.
 
-```{r sox2-lgr5, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
+```{r GO-analysis1, echo=FALSE, fig.align='center'}
 
-# Subset data
-sox_lgr <- bead.norm[,which(meta$celltype != "Atoh1-GFP")]
-pData(sox_lgr) <- droplevels(pData(sox_lgr))
+sig_genes <- row.names(res)[which(res$threshold.FDR)]
+sig_genes <- fData(bead.norm)$SYMBOL[which(fData(bead.norm)$ProbeID %in% sig_genes)]
+query <- unique(sig_genes)
+  
+gprofiler_results  <-   gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
 
-# Setup design matrix
-fac <- factor(pData(sox_lgr)[,"celltype"])
-design <- model.matrix(~0 + fac)
-colnames(design) <- c("Lgr5", "Sox2")
+allterms <- gprofiler_results$term.id
+GOs <- GOs[grep('GO:', allterms)]
+pvals <- gprofiler_results$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
 
-# Compute weights
-aweights <- arrayWeights(exprs(sox_lgr), design)
+### Atoh-1 derived cells versus Lgr5+
+The comparison of derived cells to the Lgr5 cells also yields a similar number of genes (**239 significant genes**), although p-values here are not as low as with the comparison with Atoh-1 GFP. Of these genes 49 overlap with those found in the previous comparison. The GO analysis indicates genes are involved in positive regulation of cellular processes, including repsonse to stimulus and proliferation as we would expect.
 
-# Account for technical replicates
-block <- factor(pData(sox_lgr)$replicate)
-corfit <- duplicateCorrelation(exprs(sox_lgr), design, block=block, weights=aweights)
+```{r sox2-atohderived, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
 
-# Fit model
-fit <- lmFit(exprs(sox_lgr), design, weights=aweights, block=block, cor=corfit$consensus)
-contrasts <- makeContrasts(Lgr5-Sox2, levels=design)
+# Make new contrasts
+contrasts <- makeContrasts(Atoh1Compound-Lgr5, levels=design)
 contr.fit <- eBayes(contrasts.fit(fit, contrasts))
 
 # Set threshold 
-res2 <- toptable(contr.fit, number=nrow(exprs(sox_lgr)), coef=1, sort.by="P")
+res1 <- toptable(contr.fit, number=nrow(exprs(bead.norm)), coef=1, sort.by="P")
 p.cutoff <- 0.05
 fc.cutoff <- 2
-res2$threshold.FDR <- as.logical(res2$adj.P.Val < p.cutoff & abs(res2$logFC) >=2 )
+res1$threshold.FDR <- as.logical(res1$adj.P.Val < p.cutoff & abs(res1$logFC) >=2 )
 
 # volcano_density_plot(res2[,c("logFC", "adj.P.Val")], pval.cutoff = 0.05, lfc.cutoff = 2)
 
-ggplot(data=res2, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+ggplot(data=res1, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
+  #scale_color_manual(values = c("grey", "green")) +
   geom_point(alpha=0.75, pch=16) +
   theme(legend.position = "none",
         plot.title = element_text(size = rel(1.5)),
@@ -222,37 +299,44 @@ ggplot(data=res2, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
         axis.text = element_text(size = rel(1.25))) +
   xlim(c(-7,7)) + ylim(c(0, 16)) +
   xlab("log2 fold change") + ylab("-log10 p-value")
-
 ```
 
+### GO Analysis
+```{r GO-Analysis3, echo=FALSE, fig.align='center'}
+
+sig_genes <- row.names(res1)[which(res1$threshold.FDR)]
+sig_genes <- fData(bead.norm)$SYMBOL[which(fData(bead.norm)$ProbeID %in% sig_genes)]
+query <- unique(sig_genes)
+  
+gprofiler_results  <-   gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
+
+alterms <- gprofiler_results$term.id
+GOs <- GOs[grep('GO:', allterms)]
+pvals <- gprofiler_results$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
+
+
 ## Hair cells versus Supporting cells
-The final comparison results in a gene list comarable to the first with a total of **296 significant genes** at teh same threshold used above.
+The final comparison results in a gene list comarable to the first with a total of **298 significant genes** at the same threshold used above. The REVIGO plot below does not give specific enough details, but perhaps a closer look at the results from gprofiler enrichment would give more insight. 
 
 ```{r atoh-sox2, fig.align='center', warning=FALSE, message=FALSE, echo=FALSE}
 
-# Get data
-atoh_sox2 <- bead.norm[,which(meta$celltype != "Lgr5-GFP")]
-pData(atoh_sox2) <- droplevels(pData(atoh_sox2))
-
-# Remove unwanted samples
-remove <- which(row.names(pData(atoh_sox2)) == "9982502011_H" | pData(atoh_sox2)$stage == "derived")
-atoh_sox2 <- atoh_sox2[,-remove]
-
-# Setup design matrix
-fac <- factor(pData(atoh_sox2)[,"celltype"])
-design <- model.matrix(~0 + fac)
-colnames(design) <- c("Atoh1", "Sox2")
-
-# Compute weights
-aweights <- arrayWeights(exprs(atoh_sox2), design)
-
-# Fit model
-fit <- lmFit(exprs(atoh_sox2), design, weights=aweights)
+# Make new contrasts
 contrasts <- makeContrasts(Atoh1-Sox2, levels=design)
 contr.fit <- eBayes(contrasts.fit(fit, contrasts))
 
 # Set threshold 
-res3 <- toptable(contr.fit, number=nrow(exprs(atoh_sox2)), coef=1, sort.by="P")
+res3 <- toptable(contr.fit, number=nrow(exprs(bead.norm)), coef=1, sort.by="P")
 p.cutoff <- 0.05
 fc.cutoff <- 2
 res3$threshold.FDR <- as.logical(res3$adj.P.Val < p.cutoff & abs(res3$logFC) >=2 )
@@ -268,11 +352,136 @@ ggplot(data=res3, aes(x=logFC, y=-log10(P.Value), colour=threshold.FDR)) +
 
 ```
 
+### GO Analysis
+
+```{r GO-analysis4, echo=FALSE, fig.align='center'}
+
+sig_genes <- row.names(res3)[which(res3$threshold.FDR)]
+sig_genes <- fData(bead.norm)$SYMBOL[which(fData(bead.norm)$ProbeID %in% sig_genes)]
+query <- unique(sig_genes)
+  
+gprofiler_results  <-   gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
+
+allterms <- gprofiler_results$term.id
+GOs <- GOs[grep('GO:', allterms)]
+pvals <- gprofiler_results$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
+
+## Incorporating CAGE data
+As a first pass we want to investigate whether or not we see any correlation between the CAGE data and gene expression from our microarrays, using TPM as a proxy for gene expression. From the CAGE data we only have two samples that correspond with our microarray data; hair cells (Atoh1-GFP) and supporting cells (Sox-GFP). Taking those two samples we first need to average TPM values across promoters that map to the same gene. We remove those not associated with an EntrezID and those associated with multiple EntrezIDs. 
+
+```{r cage-analysis, message=FALSE, warning=FALSE}
+# Load CAGE data
+cage_counts <- read.delim("data//mm9.cage_peak_counts.tsv", header=T, sep="\t")
+cage_tpm <- read.delim("data//mm9.cage_peak_tpm.tsv", header=T, sep="\t")
+
+# Average by Entrez ID
+df <- cage_tpm[,c(5,7:13)]
+genemeans <- aggregate(. ~ entrezgene_id, data=df, mean)
+genemeans <- genemeans[-1,]
+
+# Extract Entrez ID
+ids <- as.numeric(gsub("entrezgene:", "", genemeans$entrezgene_id))
+genemeans$entrezgene_id <- ids
+
+# Remove multiple gene mappings
+genemeans <- genemeans[which(!is.na(genemeans$entrezgene_id)),]
+cage_genes <- genemeans[which(genemeans$entrezgene_id %in% fData(bead.norm)$ENTREZ_GENE_ID),]
+
+# Log transform
+logmat <- apply(cage_genes[,2:8], 2, function(x){replace(x, which(x == 0), NA)})
+logmat <- log(logmat)
+logmat <- cbind(cage_genes$entrezgene_id, logmat)
+cage_genes <- logmat
+colnames(cage_genes)[1] <- "entrezgene_id"
+```
+
+
+We then take the microarray data and average expression values across sample replicates. Additionally, we average across probes that map to the same gene. We then merge the CAGE and array data on interesecting EntrezGene IDs and compute correlations for hair cells and supporting cells. The scatter plots below illustrate the relationship between the array data and the CAGE data. We used hexbin to plot binned expression since there are a high density of points plotted at the low end of expression (light grey = one data point). The correlation between CAGE and array appear to be reasonably high at a Spearman rank correlation of ~ 0.5.
+
+```{r array-to-cage}
+
+# Average expression values across samples in microarray data
+df <- data.frame(t(exprs(bead.norm)), sampletype=pData(bead.norm)$sampletype)
+samplemeans <- aggregate(. ~ sampletype, data=df, mean)
+samplemeans <- t(samplemeans)
+colnames(samplemeans) <- samplemeans[1,]
+samplemeans <- samplemeans[-1,]
+
+# Average expression values across probes that map to the same gene
+df <- data.frame(entrezgeneID=fData(bead.norm)$ENTREZ_GENE_ID, apply(samplemeans, 2, as.numeric))
+array_genes <- aggregate(. ~ entrezgeneID, data=df, mean)
+array_genes <- array_genes[which(array_genes$entrezgeneID %in% cage_genes[,'entrezgene_id']),]
+
+# Combine CAGE and array
+all_exprs <- merge(cage_genes, array_genes, by.x='entrezgene_id', by.y='entrezgeneID')
+colnames(all_exprs)[2] <- "Atoh1_CAGE"
+colnames(all_exprs)[8] <- "Sox2_CAGE"
+```
+
+```{r plot-cor, echo=FALSE, fig.align='center', warning=FALSE, message=FALSE, results='asis'}
+
+cor_vec <- c( cor(all_exprs$Atoh1_CAGE, all_exprs$Atoh1.GFP, use='complete.obs', method="spearman"),
+               cor(all_exprs$Sox2_CAGE, all_exprs$Sox2.GFP, use='complete.obs', method="spearman"))
+out <- data.frame(cor_vec, row.names=c("Atoh1- CAGE versus Microraray", "Sox21- CAGE versus Microraray"))
+names(out) <- "Spearman Correlation"
+kable(out, format='markdown')
+
+ggplot(all_exprs) + 
+  stat_binhex(aes(x=Atoh1_CAGE,y=Atoh1.GFP), bins=30) + 
+  scale_fill_gradientn(colours=c("grey","black")) +
+  theme(plot.title = element_text(size = rel(2.0)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlab("CAGE Expression") + ylab("Array Expression") +
+  ggtitle('Atoh1: All Genes')
+
+ggplot(all_exprs) + 
+  stat_binhex(aes(x=Sox2_CAGE,y=Sox2.GFP), bins=30) + 
+  scale_fill_gradientn(colours=c("grey","black")) +
+  theme(plot.title = element_text(size = rel(2.0)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlab("CAGE Expression") + ylab("Array Expression") +
+  ggtitle('Sox2: All Genes')
+
+```
+
+
 ## Files for download
 Below we have listed links to the various files generated in this report which will be useful for any downstream analysis.
 
-1. Normalized expression matrix [here](./data/normalized.data.txt)
-2. Metadata file [here](./meta/sample_probe_profile.csv) (containing sample information)
-3. Atoh1-GFP versus Atoh1-GFP + compound [significant genes](./results/Atoh1_comparison_results.txt)
-4. Sox2-GFP versus Lgr5+ [significant genes](./results/Sox2_Lgr5_comparison_results.txt)
-5. Hair cells versus Suporting cells [significant genes](./results/Atoh_Sox2_comparison_results.txt)
+### Data Files
+* Normalized expression matrix [here](./data/normalized.data.txt)
+* Metadata file [here](./meta/2014-436_sample_key.csv) (containing sample information)
+* CAGE expression(log transformed) and average array expression data for [intersecting gene set](./results/cage_array_expression.txt) 
+
+### DE results
+* Atoh1-GFP versus Atoh1-GFP + compound [significant genes](./results/Atoh1_comparison_results.txt)
+* Atoh1-GFP + compound versus Lgr5+ [significant genes](./results/Atoh1_Lgr5_comparison_results.txt) 
+* Sox2-GFP versus Lgr5+ [significant genes](./results/Sox2_Lgr5_comparison_results.txt)
+* Hair cells versus Suporting cells [significant genes](./results/Atoh_Sox2_comparison_results.txt)
+
+### Functional enrichment results
+* Atoh1-GFP versus Atoh1-GFP + compound [gprofiler](./results/gProfiler/Atoh_comparison_gprofiler.txt)
+* Atoh1-GFP + compound versus Lgr5+ [gprofiler](./results/gProfiler/AtohCompound_Lgr5_comparison_gprofiler.txt) 
+* Sox2-GFP versus Lgr5+ [gprofiler](./results/gProfiler/Sox2_Lgr5_comparison_gprofiler.txt)
+* Hair cells versus Suporting cells [gprofiler](./results/gProfiler/Atoh_Sox2_comparison_gprofiler.txt)
+
+```{r write-files, echo=FALSE, eval=FALSE}
+m <- match(row.names(res3), row.names(fData(bead.norm)))
+out <- cbind(res3[,1:4], fData(bead.norm)[m, c(3,4,5)])
+write.table(out, file="results//Atoh_Sox2_comparison_results.txt", sep="\t", quote=F, append=F)
+
+```
+
