@@ -1,0 +1,116 @@
+---
+title: "Edge - Array analysis of inner ear cells"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 8
+    fig_height: 6
+author: "Meeta Mistry"
+---
+
+```{r setup, echo=FALSE}
+
+# Setup report details
+clientname="Judith Kempfle"
+clientemail="Judith_Kempfle@MEEI.HARVARD.EDU"
+lablocation="HSCI - Edge Lab"
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+## Setup
+
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+
+loadlibs <- function(){
+library(ggplot2)
+library(reshape)
+library(gplots)
+library(ggdendro)
+library(RColorBrewer)
+library(CHBUtils)
+library(genefilter)
+library(pheatmap)
+library(entropy)
+}
+suppressPackageStartupMessages(loadlibs())
+```
+
+```{r functions, echo=FALSE}
+## These are functions that are used within this report
+
+# Compute entropy for rows or columns of a matrix
+getEntropy <- function(mat, index){
+  if (index > 2 | index < 1)
+    stop("Indicate 1 for rows or 2 for columns")
+  d <- apply(as.matrix(mat), index, function(x){discretize(x, numBins = 3, r=c(-1,1))})
+  entropy.vec <- apply(d, 2, entropy)
+  return(entropy.vec)
+}
+```
+
+### Get variables
+* get base directory for analyses
+* specify data and results directories
+* specify column headers used in metadata file
+
+
+```{r variables, echo=TRUE}
+# Setup directory variables
+baseDir <- '.'
+dataDir <- file.path(baseDir, "data")
+metaDir <- file.path(baseDir, "meta")
+resultsDir <- file.path(baseDir, "results")
+```
+
+# Pathprint analysis of expression data
+```{r eval=FALSE}
+exprs <- read.delim('data/normalized.data.txt', header=T, sep="\t", row.names=1)
+exprs <- as.matrix(exprs)
+pathprint.mat <- exprs2fingerprint(exprs, platform="GPL570", species="human", progressBar=TRUE)
+```
+
+```{r load-data, echo=FALSE}
+pathprint.mat <- read.delim("data/pathprint_matrix.txt", header=T, sep="\t", row.names=1)
+cnames <- sapply(colnames(pathprint.mat), function(x){gsub("X", "", x)})
+colnames(pathprint.mat) <- unname(cnames)
+```
+
+# Load in metadata
+
+```{r load-meta}
+# Add metadata
+meta <- read.csv(file.path(metaDir, '2014-436_sample_key.csv'), header=T)
+row.names(meta) <- paste(meta$array, meta$slide, sep="_")
+meta <- meta[,-c(1,2)]
+
+```
+
+# Unsupervised clustering of pathprint signatures
+```{r path-clust, fig.align='center', fig.width=20, fig.height=35}
+
+# Remove pathways that are not represented in any samples AND in all samples
+rSums <- rowSums(abs(pathprint.mat))
+var.path <- row.names(pathprint.mat)[which(rSums == ncol(pathprint.mat) | rSums == 0 )]
+sub.pathmat <- pathprint.mat[which(rownames(pathprint.mat) %in% var.path == F),]
+sub.pathmat <- as.matrix(sub.pathmat)
+
+# Get most variable pathways based on entropy 
+entropy.vec <- getEntropy(sub.pathmat, 1)
+high.entropy <- names(entropy.vec)[which(entropy.vec >= 0.5)]
+
+# Heatmap
+annotation <- data.frame(sampletype=meta[,'sampletype'], row.names=row.names(meta))
+
+pheatmap(sub.pathmat[high.entropy,], color = c("blue", "white", "red"), cluster_rows = T, 
+               annotation=annotation,
+               cluster_cols = T, show_colnames = F, clustering_distance_rows = "manhattan", 
+               clustering_distance_cols = "manhattan", legend_breaks = c(-1, 0, 1), 
+               fontsize = 10, fontsize_row = 8, height=20)
+```
+
